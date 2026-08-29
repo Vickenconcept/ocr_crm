@@ -40,6 +40,8 @@ return [
         'key' => env('OPENAI_API_KEY'),
         'base_url' => rtrim(env('OPENAI_BASE_URL', 'https://openrouter.ai/api/v1'), '/'),
         'vision_model' => env('OPENAI_VISION_MODEL', 'openai/gpt-4o'),
+        'speech_model' => env('OPENAI_SPEECH_MODEL', ''),
+        'transcribe_model' => env('OPENAI_TRANSCRIBE_MODEL', ''),
         'site_url' => env('OPENAI_SITE_URL', env('APP_URL')),
         'site_name' => env('OPENAI_SITE_NAME', env('APP_NAME', 'OCR App')),
     ],

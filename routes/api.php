@@ -10,4 +10,7 @@ Route::prefix('v1')->group(function (): void {
 
     Route::post('analyze/answer', [QuestionAnalysisController::class, 'answer'])
         ->middleware(ValidateOcrApiKey::class);
+
+    Route::post('analyze/speech', [QuestionAnalysisController::class, 'speech'])
+        ->middleware(ValidateOcrApiKey::class);
 });
