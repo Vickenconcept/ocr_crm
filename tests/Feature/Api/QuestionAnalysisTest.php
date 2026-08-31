@@ -28,7 +28,8 @@ class QuestionAnalysisTest extends TestCase
             ->assertJsonPath('ok', true)
             ->assertJsonPath('openai_configured', true)
             ->assertJsonPath('features.answer', true)
-            ->assertJsonPath('features.speech', true);
+            ->assertJsonPath('features.speech', true)
+            ->assertJsonPath('features.code', true);
     }
 
     public function test_answer_endpoint_returns_structured_questions(): void
@@ -161,5 +162,55 @@ class QuestionAnalysisTest extends TestCase
             ->assertJsonPath('question_count', 1)
             ->assertJsonPath('transcript', 'What is polymorphism in object-oriented programming?')
             ->assertJsonPath('questions.0.answer', 'The ability of different objects to respond to the same message in their own way.');
+    }
+
+    public function test_code_endpoint_returns_formatted_solution(): void
+    {
+        config([
+            'services.ocr.api_key' => 'secret-key',
+            'services.openai.key' => 'openai-key',
+        ]);
+
+        $code = <<<'JS'
+const N = 10;
+for (let i = 1; i <= N; i++) {
+  console.log(" ".repeat(N - i) + "*".repeat(2 * i - 1));
+}
+JS;
+
+        Http::fake([
+            'openrouter.ai/api/v1/chat/completions' => Http::response([
+                'choices' => [[
+                    'message' => [
+                        'content' => json_encode([
+                            'summary' => 'Print a 10-level asterisk pyramid.',
+                            'questions' => [[
+                                'number' => 1,
+                                'text' => 'Render a pyramid with N=10 asterisk rows.',
+                                'type' => 'code',
+                                'language' => 'javascript',
+                                'filename' => 'main.js',
+                                'code' => $code,
+                                'answer' => 'Loop 10 rows; pad spaces then print an odd number of stars.',
+                                'speech' => 'Print ten rows of stars, adding two stars each row and centering them with spaces.',
+                            ]],
+                        ], JSON_THROW_ON_ERROR),
+                    ],
+                ]],
+            ], 200),
+        ]);
+
+        $this->withHeader('X-OCR-API-Key', 'secret-key')
+            ->postJson('/api/v1/analyze/code', [
+                'image' => base64_encode('fake-image'),
+                'mime_type' => 'image/png',
+            ])
+            ->assertOk()
+            ->assertJsonPath('mode', 'code')
+            ->assertJsonPath('question_count', 1)
+            ->assertJsonPath('questions.0.type', 'code')
+            ->assertJsonPath('questions.0.language', 'javascript')
+            ->assertJsonPath('questions.0.filename', 'main.js')
+            ->assertJsonPath('questions.0.code', $code);
     }
 }

@@ -34,6 +34,29 @@ class OpenAIVisionService
     }
 
     /**
+     * Analyze a coding-assessment screenshot and return a formatted solution.
+     *
+     * @param  array<int, string>  $seenQuestions
+     * @param  array{resume?: string, question_context?: string}  $profile
+     * @return array{questions: array<int, array<string, mixed>>, summary: string}
+     */
+    public function analyzeCode(string $imageBase64, string $mimeType = 'image/png', array $seenQuestions = [], array $profile = []): array
+    {
+        $imageUrl = $this->normalizeImageDataUrl($imageBase64, $mimeType);
+
+        return $this->requestChatJson(
+            'You are a coding-assessment tutor. Read the screenshot, write a complete working solution, and return structured JSON only.',
+            [
+                ['type' => 'text', 'text' => $this->codeHelpPrompt($seenQuestions, $profile)],
+                ['type' => 'image_url', 'image_url' => ['url' => $imageUrl, 'detail' => 'high']],
+            ],
+            'OpenAI coding analysis request failed.',
+            null,
+            5000,
+        );
+    }
+
+    /**
      * Transcribe meeting audio, then answer any spoken questions (interview, study, or technical).
      *
      * @param  array<int, string>  $seenQuestions
@@ -242,6 +265,56 @@ PROMPT;
      * @param  array<int, string>  $seenQuestions
      * @param  array{resume?: string, question_context?: string}  $profile
      */
+    private function codeHelpPrompt(array $seenQuestions = [], array $profile = []): string
+    {
+        $seenBlock = $this->seenQuestionsBlock($seenQuestions);
+        $learnerBlock = $this->learnerContextBlock($profile);
+
+        return <<<PROMPT
+Analyze this SCREENSHOT of a coding assessment, practice problem, or code editor.
+{$seenBlock}
+{$learnerBlock}
+
+Read the visible problem, examples, constraints, language, filename, starter code, tests, and output.
+
+Return JSON with this exact shape:
+{
+  "summary": "One sentence describing the coding task",
+  "questions": [
+    {
+      "number": 1,
+      "text": "Short restatement of the task (title + what to implement)",
+      "type": "code",
+      "language": "javascript",
+      "filename": "main.js",
+      "code": "complete working program using real newlines and indentation",
+      "answer": "Brief explanation of the approach and what to type or change",
+      "speech": "Spoken walkthrough of the approach. Do not read the full code aloud."
+    }
+  ]
+}
+
+Rules:
+- You receive a SCREENSHOT IMAGE — read BOTH the problem panel AND the editor.
+- Write a COMPLETE, runnable solution in the same language as the editor.
+- Match required I/O exactly (print vs return, function name, sample N, stdout format).
+- Put the full solution in "code" with correct indentation and line breaks. Do NOT wrap it in markdown fences.
+- Prefer replacing starter boilerplate (e.g. console.log('Hello world')) with the full solution.
+- If this is a bug-fix task, return the corrected code.
+- If multiple helpers are needed, keep the main file complete in "code".
+- Keep "answer" short: what the code does and why.
+- Keep "speech" conversational and short. Mention the idea, not every line.
+- Ignore ads, timers, and unrelated UI chrome.
+- Do not repeat problems that were already processed.
+- If no NEW coding task is visible, return "questions": [] and explain in summary.
+- Return JSON only.
+PROMPT;
+    }
+
+    /**
+     * @param  array<int, string>  $seenQuestions
+     * @param  array{resume?: string, question_context?: string}  $profile
+     */
     private function spokenQuestionPrompt(string $transcript, array $seenQuestions = [], array $profile = []): string
     {
         $seenBlock = $this->seenQuestionsBlock($seenQuestions);
@@ -368,10 +441,22 @@ SEEN;
                     $speech = "Question {$number}. {$text}. The answer is {$answer}.";
                 }
 
+                $code = $this->normalizeCodeString((string) ($question['code'] ?? ''));
+
+                if ($code === '') {
+                    $code = $this->extractFencedCode($answer);
+                }
+
+                $language = strtolower(trim((string) ($question['language'] ?? '')));
+                $filename = trim((string) ($question['filename'] ?? ''));
+
                 return [
                     'number' => $number,
                     'text' => $text,
-                    'type' => (string) ($question['type'] ?? 'other'),
+                    'type' => (string) ($question['type'] ?? ($code !== '' ? 'code' : 'other')),
+                    'language' => $language,
+                    'filename' => $filename,
+                    'code' => $code,
                     'options' => array_values(array_filter(
                         (array) ($question['options'] ?? []),
                         fn ($option) => is_string($option) && $option !== '',
@@ -386,6 +471,28 @@ SEEN;
             'summary' => trim((string) ($payload['summary'] ?? 'Analysis complete.')),
             'questions' => $questions,
         ];
+    }
+
+    private function normalizeCodeString(string $code): string
+    {
+        $code = str_replace(["\r\n", "\r"], "\n", trim($code));
+
+        if ($code === '') {
+            return '';
+        }
+
+        $fenced = $this->extractFencedCode($code);
+
+        return $fenced !== '' ? $fenced : $code;
+    }
+
+    private function extractFencedCode(string $text): string
+    {
+        if (preg_match('/```(?:[a-zA-Z0-9_+-]*)\s*\n([\s\S]*?)\n```/', $text, $matches) === 1) {
+            return rtrim(str_replace(["\r\n", "\r"], "\n", $matches[1]));
+        }
+
+        return '';
     }
 
     private function normalizeImageDataUrl(string $imageBase64, string $mimeType): string
