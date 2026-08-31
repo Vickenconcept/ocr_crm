@@ -38,7 +38,7 @@ class OpenAIVisionService
      *
      * @param  array<int, string>  $seenQuestions
      * @param  array{resume?: string, question_context?: string}  $profile
-     * @param  array{text?: string, code?: string, diagnosis?: string, stuck_count?: int, dictate_line_index?: int}  $previousAttempt
+     * @param  array{text?: string, code?: string, diagnosis?: string}  $previousAttempt
      * @return array{questions: array<int, array<string, mixed>>, summary: string}
      */
     public function analyzeCode(
@@ -270,20 +270,18 @@ PROMPT;
     /**
      * @param  array<int, string>  $seenQuestions
      * @param  array{resume?: string, question_context?: string}  $profile
-     * @param  array{text?: string, code?: string, diagnosis?: string, stuck_count?: int, dictate_line_index?: int}  $previousAttempt
+     * @param  array{text?: string, code?: string, diagnosis?: string}  $previousAttempt
      */
     private function codeHelpPrompt(array $seenQuestions = [], array $profile = [], array $previousAttempt = []): string
     {
         $learnerBlock = $this->learnerContextBlock($profile);
         $previousBlock = $this->previousCodingAttemptBlock($previousAttempt);
-        $stuckBlock = $this->stuckCoachBlock($previousAttempt);
 
         return <<<PROMPT
 This is a LIVE coaching pass. The popup may be closed. The candidate is writing in the editor right now.
 Understand the CURRENT STATE of the whole screen, not only the problem title.
 {$learnerBlock}
 {$previousBlock}
-{$stuckBlock}
 
 Read EVERY visible panel:
 1. Problem / description / examples / constraints
@@ -301,11 +299,10 @@ Return JSON with this exact shape:
       "language": "javascript",
       "filename": "main.js",
       "diagnosis": "Where they are: what is already written, what is wrong or missing",
-      "next_step": "The single next line of code to type, as plain text",
-      "dictation": "The same next line spoken for typing along — spell symbols (equals, dot, quote, open paren, semicolon, star). Empty if not dictating yet.",
+      "next_step": "The single next thing to type or change right now",
       "code": "complete CLEAN working program using real newlines and indentation. Plain source only.",
-      "answer": "What to do next, then a brief why.",
-      "speech": "What to say out loud. When dictating, read dictation slowly so they can type along."
+      "answer": "What to do next, then a brief why. Keep it short enough to follow while typing.",
+      "speech": "2 to 4 short spoken sentences. Say where they are, then the next step. Do not read the full code aloud."
     }
   ]
 }
@@ -313,14 +310,15 @@ Return JSON with this exact shape:
 Rules:
 - You receive a SCREENSHOT — read problem + editor + errors/output together.
 - NEVER skip because this problem was seen before. Recapture means they typed, ran, or hit an error. Analyze the new state.
-- Coach from the CURRENT editor, not from a blank file.
-- If ERRORS are visible, lead with that in summary, diagnosis, next_step, dictation, answer, and speech.
-- "code" must be plain source. NEVER include HTML, markdown fences, or syntax-highlight markup.
+- Coach from the CURRENT editor, not from a blank file. If they already have a loop, do not pretend they have nothing.
+- If ERRORS / SyntaxError / failed tests are visible, lead with that in summary, diagnosis, next_step, answer, and speech.
+- Compare the editor text with the error snippet. If the error shows extra tokens (HTML, class=, tok-str, span tags, leftover markdown fences), the file has corrupted paste — say that and return CLEAN source.
+- "code" must be plain source they can paste. NEVER include HTML, CSS classes, markdown fences, or syntax-highlight markup.
 - Match required I/O exactly (print vs return, function name, N value, stdout format).
-- If they are mid-solution, next_step must be ONE line they still need — not the whole file.
-- If STUCK COACH MODE is active: do NOT repeat the same general advice. Fill "dictation" with the exact next line, symbols spelled out. "speech" must read dictation aloud.
-- If stuck_count >= 3, spell even more slowly: identifiers letter-by-letter only for tricky tokens; otherwise read the line naturally with symbols named.
-- If the solution looks complete and output matches, say they are done and leave dictation empty.
+- If the visible logic is already correct and only paste/syntax junk broke the run, keep the same algorithm and strip the junk.
+- If they are mid-solution, next_step and speech should name the next line or fix, not restart the whole problem.
+- If the editor is still starter boilerplate, give the first lines to type and still include the full solution in "code".
+- If the solution already looks complete and output matches, say they are done and keep speech very short.
 - Ignore ads, timers, and unrelated chrome.
 - If no coding task is visible, return "questions": [] and explain in summary.
 - Return JSON only.
@@ -328,34 +326,7 @@ PROMPT;
     }
 
     /**
-     * @param  array{text?: string, code?: string, diagnosis?: string, stuck_count?: int, dictate_line_index?: int}  $previousAttempt
-     */
-    private function stuckCoachBlock(array $previousAttempt): string
-    {
-        $stuckCount = (int) ($previousAttempt['stuck_count'] ?? 0);
-
-        if ($stuckCount < 2) {
-            return '';
-        }
-
-        $lineIndex = (int) ($previousAttempt['dictate_line_index'] ?? 0);
-
-        return <<<BLOCK
-
-STUCK COACH MODE — the candidate heard the same advice {$stuckCount} times and still has not progressed.
-They may not know what to type. Switch from hints to DICTATION:
-- Compare the editor to "code". Find the first line that is missing or wrong.
-- Put that exact line in "next_step" as plain code text.
-- Put a speakable version in "dictation". Spell symbols: equals, dot, comma, semicolon, open paren, close paren, quote, star, plus, minus, slash.
-  Example dictation: "let spaces equals single quote space single quote dot repeat open paren N minus i minus 1 close paren semicolon"
-- "speech" must read dictation clearly so they can type along without opening the popup.
-- Do NOT give the same vague advice again.
-- Dictation line index hint: {$lineIndex} (0 = first missing line).
-BLOCK;
-    }
-
-    /**
-     * @param  array{text?: string, code?: string, diagnosis?: string, stuck_count?: int, dictate_line_index?: int}  $previousAttempt
+     * @param  array{text?: string, code?: string, diagnosis?: string}  $previousAttempt
      */
     private function previousCodingAttemptBlock(array $previousAttempt): string
     {
@@ -518,11 +489,8 @@ SEEN;
                 $filename = trim((string) ($question['filename'] ?? ''));
                 $diagnosis = trim((string) ($question['diagnosis'] ?? ''));
                 $nextStep = trim((string) ($question['next_step'] ?? ''));
-                $dictation = trim((string) ($question['dictation'] ?? ''));
 
-                if ($dictation !== '') {
-                    $speech = $dictation;
-                } elseif ($speech === '') {
+                if ($speech === '') {
                     $speech = $nextStep !== ''
                         ? $nextStep
                         : "Question {$number}. {$text}. The answer is {$answer}.";
@@ -536,7 +504,6 @@ SEEN;
                     'filename' => $filename,
                     'diagnosis' => $diagnosis,
                     'next_step' => $nextStep,
-                    'dictation' => $dictation,
                     'code' => $code,
                     'options' => array_values(array_filter(
                         (array) ($question['options'] ?? []),
