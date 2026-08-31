@@ -51,7 +51,7 @@ class OpenAIVisionService
         $imageUrl = $this->normalizeImageDataUrl($imageBase64, $mimeType);
 
         return $this->requestChatJson(
-            'You are a coding-assessment tutor. Read the CURRENT screen state — problem, editor, errors, and output — then diagnose and return a clean fix as JSON only.',
+            'You are a live coding coach. Read the CURRENT editor and errors, say where the candidate is, tell the next step out loud, and return a clean full solution as JSON only.',
             [
                 ['type' => 'text', 'text' => $this->codeHelpPrompt($seenQuestions, $profile, $previousAttempt)],
                 ['type' => 'image_url', 'image_url' => ['url' => $imageUrl, 'detail' => 'high']],
@@ -278,18 +278,19 @@ PROMPT;
         $previousBlock = $this->previousCodingAttemptBlock($previousAttempt);
 
         return <<<PROMPT
-Analyze this SCREENSHOT of a coding assessment. Understand the CURRENT STATE of the whole screen, not only the problem title.
+This is a LIVE coaching pass. The popup may be closed. The candidate is writing in the editor right now.
+Understand the CURRENT STATE of the whole screen, not only the problem title.
 {$learnerBlock}
 {$previousBlock}
 
 Read EVERY visible panel:
 1. Problem / description / examples / constraints
-2. Editor: language, filename, and the code that is actually there now
+2. Editor: language, filename, and the code that is actually there now — what is already typed, what is missing
 3. OUTPUT, ERRORS, TESTS, console, or diff — including red error text
 
 Return JSON with this exact shape:
 {
-  "summary": "One sentence: what is happening on screen right now (task, run result, or error)",
+  "summary": "One sentence: where they are right now (blank editor, mid-solution, error, or done)",
   "questions": [
     {
       "number": 1,
@@ -297,24 +298,27 @@ Return JSON with this exact shape:
       "type": "code",
       "language": "javascript",
       "filename": "main.js",
-      "diagnosis": "What the current code/output/error means. If it failed, name the error and the cause.",
+      "diagnosis": "Where they are: what is already written, what is wrong or missing",
+      "next_step": "The single next thing to type or change right now",
       "code": "complete CLEAN working program using real newlines and indentation. Plain source only.",
-      "answer": "What to do next: delete/replace which lines, then why the new code works",
-      "speech": "Spoken diagnosis then the fix. Mention the error if one is visible. Do not read the full code aloud."
+      "answer": "What to do next, then a brief why. Keep it short enough to follow while typing.",
+      "speech": "2 to 4 short spoken sentences. Say where they are, then the next step. Do not read the full code aloud."
     }
   ]
 }
 
 Rules:
 - You receive a SCREENSHOT — read problem + editor + errors/output together.
-- NEVER skip because this problem was seen before. A recapture means the candidate ran code or changed it. Analyze the new state.
-- If ERRORS / SyntaxError / failed tests are visible, lead with that in summary, diagnosis, answer, and speech.
-- Compare the editor text with the error snippet. Editors sometimes hide junk. If the error shows extra tokens (HTML, class=, tok-str, span tags, leftover markdown fences), the file has corrupted paste — say that clearly and return CLEAN source with no HTML.
-- "code" must be plain source the candidate can paste. NEVER include HTML, CSS classes, markdown fences, or syntax-highlight markup.
+- NEVER skip because this problem was seen before. Recapture means they typed, ran, or hit an error. Analyze the new state.
+- Coach from the CURRENT editor, not from a blank file. If they already have a loop, do not pretend they have nothing.
+- If ERRORS / SyntaxError / failed tests are visible, lead with that in summary, diagnosis, next_step, answer, and speech.
+- Compare the editor text with the error snippet. If the error shows extra tokens (HTML, class=, tok-str, span tags, leftover markdown fences), the file has corrupted paste — say that and return CLEAN source.
+- "code" must be plain source they can paste. NEVER include HTML, CSS classes, markdown fences, or syntax-highlight markup.
 - Match required I/O exactly (print vs return, function name, N value, stdout format).
 - If the visible logic is already correct and only paste/syntax junk broke the run, keep the same algorithm and strip the junk.
-- If output is wrong vs the examples, fix the algorithm and explain the mismatch.
-- If the editor is still starter boilerplate, write the full solution.
+- If they are mid-solution, next_step and speech should name the next line or fix, not restart the whole problem.
+- If the editor is still starter boilerplate, give the first lines to type and still include the full solution in "code".
+- If the solution already looks complete and output matches, say they are done and keep speech very short.
 - Ignore ads, timers, and unrelated chrome.
 - If no coding task is visible, return "questions": [] and explain in summary.
 - Return JSON only.
@@ -475,11 +479,6 @@ SEEN;
                 $text = trim((string) $question['text']);
                 $answer = trim((string) ($question['answer'] ?? ''));
                 $speech = trim((string) ($question['speech'] ?? ''));
-
-                if ($speech === '') {
-                    $speech = "Question {$number}. {$text}. The answer is {$answer}.";
-                }
-
                 $code = $this->normalizeCodeString((string) ($question['code'] ?? ''));
 
                 if ($code === '') {
@@ -489,6 +488,13 @@ SEEN;
                 $language = strtolower(trim((string) ($question['language'] ?? '')));
                 $filename = trim((string) ($question['filename'] ?? ''));
                 $diagnosis = trim((string) ($question['diagnosis'] ?? ''));
+                $nextStep = trim((string) ($question['next_step'] ?? ''));
+
+                if ($speech === '') {
+                    $speech = $nextStep !== ''
+                        ? $nextStep
+                        : "Question {$number}. {$text}. The answer is {$answer}.";
+                }
 
                 return [
                     'number' => $number,
@@ -497,6 +503,7 @@ SEEN;
                     'language' => $language,
                     'filename' => $filename,
                     'diagnosis' => $diagnosis,
+                    'next_step' => $nextStep,
                     'code' => $code,
                     'options' => array_values(array_filter(
                         (array) ($question['options'] ?? []),
