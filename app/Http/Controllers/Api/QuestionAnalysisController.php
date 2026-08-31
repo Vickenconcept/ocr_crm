@@ -76,6 +76,10 @@ class QuestionAnalysisController extends Controller
             'profile' => ['nullable', 'array'],
             'profile.resume' => ['nullable', 'string', 'max:20000'],
             'profile.question_context' => ['nullable', 'string', 'max:8000'],
+            'previous_attempt' => ['nullable', 'array'],
+            'previous_attempt.text' => ['nullable', 'string', 'max:2000'],
+            'previous_attempt.code' => ['nullable', 'string', 'max:20000'],
+            'previous_attempt.diagnosis' => ['nullable', 'string', 'max:4000'],
         ]);
 
         if (! $this->vision->isConfigured()) {
@@ -90,6 +94,7 @@ class QuestionAnalysisController extends Controller
                 $data['mime_type'] ?? 'image/png',
                 $data['seen_questions'] ?? [],
                 $data['profile'] ?? [],
+                $data['previous_attempt'] ?? [],
             );
         } catch (\RuntimeException $exception) {
             return response()->json([

@@ -38,16 +38,22 @@ class OpenAIVisionService
      *
      * @param  array<int, string>  $seenQuestions
      * @param  array{resume?: string, question_context?: string}  $profile
+     * @param  array{text?: string, code?: string, diagnosis?: string}  $previousAttempt
      * @return array{questions: array<int, array<string, mixed>>, summary: string}
      */
-    public function analyzeCode(string $imageBase64, string $mimeType = 'image/png', array $seenQuestions = [], array $profile = []): array
-    {
+    public function analyzeCode(
+        string $imageBase64,
+        string $mimeType = 'image/png',
+        array $seenQuestions = [],
+        array $profile = [],
+        array $previousAttempt = [],
+    ): array {
         $imageUrl = $this->normalizeImageDataUrl($imageBase64, $mimeType);
 
         return $this->requestChatJson(
-            'You are a coding-assessment tutor. Read the screenshot, write a complete working solution, and return structured JSON only.',
+            'You are a coding-assessment tutor. Read the CURRENT screen state — problem, editor, errors, and output — then diagnose and return a clean fix as JSON only.',
             [
-                ['type' => 'text', 'text' => $this->codeHelpPrompt($seenQuestions, $profile)],
+                ['type' => 'text', 'text' => $this->codeHelpPrompt($seenQuestions, $profile, $previousAttempt)],
                 ['type' => 'image_url', 'image_url' => ['url' => $imageUrl, 'detail' => 'high']],
             ],
             'OpenAI coding analysis request failed.',
@@ -264,51 +270,84 @@ PROMPT;
     /**
      * @param  array<int, string>  $seenQuestions
      * @param  array{resume?: string, question_context?: string}  $profile
+     * @param  array{text?: string, code?: string, diagnosis?: string}  $previousAttempt
      */
-    private function codeHelpPrompt(array $seenQuestions = [], array $profile = []): string
+    private function codeHelpPrompt(array $seenQuestions = [], array $profile = [], array $previousAttempt = []): string
     {
-        $seenBlock = $this->seenQuestionsBlock($seenQuestions);
         $learnerBlock = $this->learnerContextBlock($profile);
+        $previousBlock = $this->previousCodingAttemptBlock($previousAttempt);
 
         return <<<PROMPT
-Analyze this SCREENSHOT of a coding assessment, practice problem, or code editor.
-{$seenBlock}
+Analyze this SCREENSHOT of a coding assessment. Understand the CURRENT STATE of the whole screen, not only the problem title.
 {$learnerBlock}
+{$previousBlock}
 
-Read the visible problem, examples, constraints, language, filename, starter code, tests, and output.
+Read EVERY visible panel:
+1. Problem / description / examples / constraints
+2. Editor: language, filename, and the code that is actually there now
+3. OUTPUT, ERRORS, TESTS, console, or diff — including red error text
 
 Return JSON with this exact shape:
 {
-  "summary": "One sentence describing the coding task",
+  "summary": "One sentence: what is happening on screen right now (task, run result, or error)",
   "questions": [
     {
       "number": 1,
-      "text": "Short restatement of the task (title + what to implement)",
+      "text": "Short restatement of the task",
       "type": "code",
       "language": "javascript",
       "filename": "main.js",
-      "code": "complete working program using real newlines and indentation",
-      "answer": "Brief explanation of the approach and what to type or change",
-      "speech": "Spoken walkthrough of the approach. Do not read the full code aloud."
+      "diagnosis": "What the current code/output/error means. If it failed, name the error and the cause.",
+      "code": "complete CLEAN working program using real newlines and indentation. Plain source only.",
+      "answer": "What to do next: delete/replace which lines, then why the new code works",
+      "speech": "Spoken diagnosis then the fix. Mention the error if one is visible. Do not read the full code aloud."
     }
   ]
 }
 
 Rules:
-- You receive a SCREENSHOT IMAGE — read BOTH the problem panel AND the editor.
-- Write a COMPLETE, runnable solution in the same language as the editor.
-- Match required I/O exactly (print vs return, function name, sample N, stdout format).
-- Put the full solution in "code" with correct indentation and line breaks. Do NOT wrap it in markdown fences.
-- Prefer replacing starter boilerplate (e.g. console.log('Hello world')) with the full solution.
-- If this is a bug-fix task, return the corrected code.
-- If multiple helpers are needed, keep the main file complete in "code".
-- Keep "answer" short: what the code does and why.
-- Keep "speech" conversational and short. Mention the idea, not every line.
-- Ignore ads, timers, and unrelated UI chrome.
-- Do not repeat problems that were already processed.
-- If no NEW coding task is visible, return "questions": [] and explain in summary.
+- You receive a SCREENSHOT — read problem + editor + errors/output together.
+- NEVER skip because this problem was seen before. A recapture means the candidate ran code or changed it. Analyze the new state.
+- If ERRORS / SyntaxError / failed tests are visible, lead with that in summary, diagnosis, answer, and speech.
+- Compare the editor text with the error snippet. Editors sometimes hide junk. If the error shows extra tokens (HTML, class=, tok-str, span tags, leftover markdown fences), the file has corrupted paste — say that clearly and return CLEAN source with no HTML.
+- "code" must be plain source the candidate can paste. NEVER include HTML, CSS classes, markdown fences, or syntax-highlight markup.
+- Match required I/O exactly (print vs return, function name, N value, stdout format).
+- If the visible logic is already correct and only paste/syntax junk broke the run, keep the same algorithm and strip the junk.
+- If output is wrong vs the examples, fix the algorithm and explain the mismatch.
+- If the editor is still starter boilerplate, write the full solution.
+- Ignore ads, timers, and unrelated chrome.
+- If no coding task is visible, return "questions": [] and explain in summary.
 - Return JSON only.
 PROMPT;
+    }
+
+    /**
+     * @param  array{text?: string, code?: string, diagnosis?: string}  $previousAttempt
+     */
+    private function previousCodingAttemptBlock(array $previousAttempt): string
+    {
+        $text = trim((string) ($previousAttempt['text'] ?? ''));
+        $code = trim((string) ($previousAttempt['code'] ?? ''));
+        $diagnosis = trim((string) ($previousAttempt['diagnosis'] ?? ''));
+
+        if ($text === '' && $code === '' && $diagnosis === '') {
+            return '';
+        }
+
+        $code = $this->normalizeCodeString($code);
+
+        return <<<BLOCK
+
+A solution was already suggested earlier in this session. Do NOT skip this screenshot.
+The candidate captured again after editing or running. Treat this as a NEW screen state.
+
+Previous task: {$text}
+Previous diagnosis: {$diagnosis}
+Previous suggested code:
+{$code}
+
+Look at what is on screen NOW. If it failed, explain the error and return a clean fixed program.
+BLOCK;
     }
 
     /**
@@ -449,6 +488,7 @@ SEEN;
 
                 $language = strtolower(trim((string) ($question['language'] ?? '')));
                 $filename = trim((string) ($question['filename'] ?? ''));
+                $diagnosis = trim((string) ($question['diagnosis'] ?? ''));
 
                 return [
                     'number' => $number,
@@ -456,6 +496,7 @@ SEEN;
                     'type' => (string) ($question['type'] ?? ($code !== '' ? 'code' : 'other')),
                     'language' => $language,
                     'filename' => $filename,
+                    'diagnosis' => $diagnosis,
                     'code' => $code,
                     'options' => array_values(array_filter(
                         (array) ($question['options'] ?? []),
@@ -482,8 +523,18 @@ SEEN;
         }
 
         $fenced = $this->extractFencedCode($code);
+        $code = $fenced !== '' ? $fenced : $code;
 
-        return $fenced !== '' ? $fenced : $code;
+        return $this->stripHighlightMarkup($code);
+    }
+
+    private function stripHighlightMarkup(string $code): string
+    {
+        $code = preg_replace('/<\/?span[^>]*>/i', '', $code) ?? $code;
+        $code = preg_replace('/class=["\']tok-[^"\']*["\']\s*>?/i', '', $code) ?? $code;
+        $code = str_replace(['&quot;', '&#039;', '&lt;', '&gt;', '&amp;'], ['"', "'", '<', '>', '&'], $code);
+
+        return trim($code);
     }
 
     private function extractFencedCode(string $text): string

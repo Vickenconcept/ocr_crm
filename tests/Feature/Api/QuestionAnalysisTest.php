@@ -190,6 +190,7 @@ JS;
                                 'type' => 'code',
                                 'language' => 'javascript',
                                 'filename' => 'main.js',
+                                'diagnosis' => 'Starter Hello world is still in the editor.',
                                 'code' => $code,
                                 'answer' => 'Loop 10 rows; pad spaces then print an odd number of stars.',
                                 'speech' => 'Print ten rows of stars, adding two stars each row and centering them with spaces.',
@@ -211,6 +212,64 @@ JS;
             ->assertJsonPath('questions.0.type', 'code')
             ->assertJsonPath('questions.0.language', 'javascript')
             ->assertJsonPath('questions.0.filename', 'main.js')
+            ->assertJsonPath('questions.0.diagnosis', 'Starter Hello world is still in the editor.')
             ->assertJsonPath('questions.0.code', $code);
+    }
+
+    public function test_code_endpoint_strips_highlight_markup_and_uses_previous_attempt(): void
+    {
+        config([
+            'services.ocr.api_key' => 'secret-key',
+            'services.openai.key' => 'openai-key',
+        ]);
+
+        Http::fake([
+            'openrouter.ai/api/v1/chat/completions' => Http::response([
+                'choices' => [[
+                    'message' => [
+                        'content' => json_encode([
+                            'summary' => 'The run failed because highlight HTML was pasted.',
+                            'questions' => [[
+                                'number' => 1,
+                                'text' => 'Render a pyramid with N=10 asterisk rows.',
+                                'type' => 'code',
+                                'language' => 'javascript',
+                                'filename' => 'main.js',
+                                'diagnosis' => 'SyntaxError from leftover tok-str HTML in line 3.',
+                                'code' => 'let spaces = <span class="tok-str">\' \'</span>.repeat(N - i - 1);',
+                                'answer' => 'Replace the file with clean source. Do not copy highlighted HTML.',
+                                'speech' => 'The error is leftover highlight HTML. Paste the clean code.',
+                            ]],
+                        ], JSON_THROW_ON_ERROR),
+                    ],
+                ]],
+            ], 200),
+        ]);
+
+        $this->withHeader('X-OCR-API-Key', 'secret-key')
+            ->postJson('/api/v1/analyze/code', [
+                'image' => base64_encode('fake-image'),
+                'mime_type' => 'image/png',
+                'previous_attempt' => [
+                    'text' => 'Render a pyramid with N=10 asterisk rows.',
+                    'code' => 'generatePyramid(10);',
+                    'diagnosis' => 'First pass.',
+                ],
+            ])
+            ->assertOk()
+            ->assertJsonPath('questions.0.diagnosis', 'SyntaxError from leftover tok-str HTML in line 3.')
+            ->assertJsonPath('questions.0.code', "let spaces = ' '.repeat(N - i - 1);");
+
+        Http::assertSent(function ($request): bool {
+            if (! str_contains($request->url(), '/chat/completions')) {
+                return false;
+            }
+
+            $text = (string) data_get($request->data(), 'messages.1.content.0.text', '');
+
+            return str_contains($text, 'generatePyramid(10);')
+                && str_contains($text, 'Do NOT skip this screenshot')
+                && str_contains($text, 'OUTPUT, ERRORS, TESTS');
+        });
     }
 }
