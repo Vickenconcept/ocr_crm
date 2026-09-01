@@ -80,6 +80,11 @@ class QuestionAnalysisController extends Controller
             'previous_attempt.text' => ['nullable', 'string', 'max:2000'],
             'previous_attempt.code' => ['nullable', 'string', 'max:20000'],
             'previous_attempt.diagnosis' => ['nullable', 'string', 'max:4000'],
+            'previous_attempt.dictation_mode' => ['nullable', 'boolean'],
+            'previous_attempt.step_mode' => ['nullable', 'boolean'],
+            'previous_attempt.repeat_count' => ['nullable', 'integer', 'min:0', 'max:100'],
+            'previous_attempt.step_index' => ['nullable', 'integer', 'min:0', 'max:1000'],
+            'previous_attempt.dictation_line' => ['nullable', 'integer', 'min:0', 'max:1000'],
         ]);
 
         if (! $this->vision->isConfigured()) {

@@ -38,7 +38,7 @@ class OpenAIVisionService
      *
      * @param  array<int, string>  $seenQuestions
      * @param  array{resume?: string, question_context?: string}  $profile
-     * @param  array{text?: string, code?: string, diagnosis?: string}  $previousAttempt
+     * @param  array{text?: string, code?: string, diagnosis?: string, step_mode?: bool, repeat_count?: int, step_index?: int}  $previousAttempt
      * @return array{questions: array<int, array<string, mixed>>, summary: string}
      */
     public function analyzeCode(
@@ -270,18 +270,21 @@ PROMPT;
     /**
      * @param  array<int, string>  $seenQuestions
      * @param  array{resume?: string, question_context?: string}  $profile
-     * @param  array{text?: string, code?: string, diagnosis?: string}  $previousAttempt
+     * @param  array{text?: string, code?: string, diagnosis?: string, step_mode?: bool, repeat_count?: int, step_index?: int}  $previousAttempt
      */
     private function codeHelpPrompt(array $seenQuestions = [], array $profile = [], array $previousAttempt = []): string
     {
         $learnerBlock = $this->learnerContextBlock($profile);
         $previousBlock = $this->previousCodingAttemptBlock($previousAttempt);
+        $stepBlock = $this->stepByStepBlock($previousAttempt);
 
         return <<<PROMPT
 This is a LIVE coaching pass. The popup may be closed. The candidate is writing in the editor right now.
+Coach them piece by piece — like a tutor sitting beside them, not a lecture.
 Understand the CURRENT STATE of the whole screen, not only the problem title.
 {$learnerBlock}
 {$previousBlock}
+{$stepBlock}
 
 Read EVERY visible panel:
 1. Problem / description / examples / constraints
@@ -299,10 +302,12 @@ Return JSON with this exact shape:
       "language": "javascript",
       "filename": "main.js",
       "diagnosis": "Where they are: what is already written, what is wrong or missing",
-      "next_step": "The single next thing to type or change right now",
+      "place": "Where in the file to work next, e.g. inside the function, inside the loop, at the bottom",
+      "snippet": "The exact small piece of code to add or change right now — one statement or line",
+      "next_step": "Same as speech: the single next piece to type",
       "code": "complete CLEAN working program using real newlines and indentation. Plain source only.",
-      "answer": "What to do next, then a brief why. Keep it short enough to follow while typing.",
-      "speech": "2 to 4 short spoken sentences. Say where they are, then the next step. Do not read the full code aloud."
+      "answer": "Brief why this piece comes next",
+      "speech": "2 to 4 short conversational sentences. Name the place, then the code. Example: Inside the function, add: const spaces = ' '.repeat(N - i - 1);"
     }
   ]
 }
@@ -316,9 +321,18 @@ Rules:
 - "code" must be plain source they can paste. NEVER include HTML, CSS classes, markdown fences, or syntax-highlight markup.
 - Match required I/O exactly (print vs return, function name, N value, stdout format).
 - If the visible logic is already correct and only paste/syntax junk broke the run, keep the same algorithm and strip the junk.
-- If they are mid-solution, next_step and speech should name the next line or fix, not restart the whole problem.
+- Coach ONE piece at a time. Wait for them to type it before moving on. Compare the editor on this screenshot with the last pass.
+- If they already typed the last suggested piece, give the NEXT piece only — do not repeat what is already there.
+- speech and next_step must sound conversational: name the place, then the code. Examples:
+  - "At the top of the file, add: function generatePyramid(N) {"
+  - "Inside the function, add the loop: for (let i = 0; i < N; i++) {"
+  - "Inside the loop, add: let spaces = ' '.repeat(N - i - 1);"
+  - "At the bottom, call it with: generatePyramid(10);"
+- place = where. snippet = the exact code for this step only. speech = place + snippet spoken naturally.
+- Do NOT dump the whole solution in speech. One piece per response unless they are completely stuck.
 - If the editor is still starter boilerplate, give the first lines to type and still include the full solution in "code".
 - If the solution already looks complete and output matches, say they are done and keep speech very short.
+- If STEP-BY-STEP MODE is active, they need even smaller pieces. One line or one statement at a time.
 - Ignore ads, timers, and unrelated chrome.
 - If no coding task is visible, return "questions": [] and explain in summary.
 - Return JSON only.
@@ -351,6 +365,33 @@ Previous suggested code:
 {$code}
 
 Look at what is on screen NOW. If it failed, explain the error and return a clean fixed program.
+BLOCK;
+    }
+
+    /**
+     * @param  array{text?: string, code?: string, diagnosis?: string, step_mode?: bool, repeat_count?: int, step_index?: int}  $previousAttempt
+     */
+    private function stepByStepBlock(array $previousAttempt): string
+    {
+        $stepMode = (bool) ($previousAttempt['step_mode'] ?? false);
+        $repeatCount = (int) ($previousAttempt['repeat_count'] ?? 0);
+        $stepIndex = (int) ($previousAttempt['step_index'] ?? 0);
+
+        if (! $stepMode && $repeatCount < 3) {
+            return '';
+        }
+
+        return <<<BLOCK
+
+STEP-BY-STEP MODE — the candidate is writing live and needs one small piece at a time.
+Talk like you are pair-programming: say WHERE, then WHAT code goes there.
+
+Rules for this pass:
+- Give only the next missing piece — one statement, one line, or one brace
+- If their editor already has the last piece you suggested, move to the next one
+- speech example: "Inside the loop, add: let stars = '*'.repeat(2 * i + 1);"
+- Current step progress index: {$stepIndex}
+- Repeat count (they may be stuck): {$repeatCount}
 BLOCK;
     }
 
@@ -489,11 +530,17 @@ SEEN;
                 $filename = trim((string) ($question['filename'] ?? ''));
                 $diagnosis = trim((string) ($question['diagnosis'] ?? ''));
                 $nextStep = trim((string) ($question['next_step'] ?? ''));
+                $place = trim((string) ($question['place'] ?? ''));
+                $snippet = trim((string) ($question['snippet'] ?? ''));
 
                 if ($speech === '') {
-                    $speech = $nextStep !== ''
-                        ? $nextStep
-                        : "Question {$number}. {$text}. The answer is {$answer}.";
+                    if ($place !== '' && $snippet !== '') {
+                        $speech = "{$place}, add: {$snippet}";
+                    } elseif ($nextStep !== '') {
+                        $speech = $nextStep;
+                    } else {
+                        $speech = "Question {$number}. {$text}. The answer is {$answer}.";
+                    }
                 }
 
                 return [
@@ -504,6 +551,8 @@ SEEN;
                     'filename' => $filename,
                     'diagnosis' => $diagnosis,
                     'next_step' => $nextStep,
+                    'place' => $place,
+                    'snippet' => $snippet,
                     'code' => $code,
                     'options' => array_values(array_filter(
                         (array) ($question['options'] ?? []),
