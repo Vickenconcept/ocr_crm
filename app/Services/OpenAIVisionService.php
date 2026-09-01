@@ -276,15 +276,15 @@ PROMPT;
     {
         $learnerBlock = $this->learnerContextBlock($profile);
         $previousBlock = $this->previousCodingAttemptBlock($previousAttempt);
-        $stepBlock = $this->stepByStepBlock($previousAttempt);
+        $coachingBlock = $this->coachingBrainBlock($previousAttempt);
 
         return <<<PROMPT
 This is a LIVE coaching pass. The popup may be closed. The candidate is writing in the editor right now.
-Coach them piece by piece — like a tutor sitting beside them, not a lecture.
+Coach them like a smart tutor — adapt how much help you give based on COACHING BRAIN metrics below.
 Understand the CURRENT STATE of the whole screen, not only the problem title.
 {$learnerBlock}
 {$previousBlock}
-{$stepBlock}
+{$coachingBlock}
 
 Read EVERY visible panel:
 1. Problem / description / examples / constraints
@@ -332,7 +332,9 @@ Rules:
 - Do NOT dump the whole solution in speech. One piece per response unless they are completely stuck.
 - If the editor is still starter boilerplate, give the first lines to type and still include the full solution in "code".
 - If the solution already looks complete and output matches, say they are done and keep speech very short.
-- If STEP-BY-STEP MODE is active, they need even smaller pieces. One line or one statement at a time.
+- If COACHING LEVEL is "discuss", explain the approach first — do not dump code yet.
+- If COACHING LEVEL is "direct", give place + one snippet only.
+- If COACHING LEVEL is "basic", give the smallest possible next piece — one line or one statement.
 - Ignore ads, timers, and unrelated chrome.
 - If no coding task is visible, return "questions": [] and explain in summary.
 - Return JSON only.
@@ -371,27 +373,44 @@ BLOCK;
     /**
      * @param  array{text?: string, code?: string, diagnosis?: string, step_mode?: bool, repeat_count?: int, step_index?: int}  $previousAttempt
      */
-    private function stepByStepBlock(array $previousAttempt): string
+    private function coachingBrainBlock(array $previousAttempt): string
     {
-        $stepMode = (bool) ($previousAttempt['step_mode'] ?? false);
-        $repeatCount = (int) ($previousAttempt['repeat_count'] ?? 0);
-        $stepIndex = (int) ($previousAttempt['step_index'] ?? 0);
+        $coaching = is_array($previousAttempt['coaching'] ?? null) ? $previousAttempt['coaching'] : [];
+        $level = (string) ($coaching['coaching_level'] ?? 'direct');
+        $label = (string) ($coaching['level_label'] ?? '');
+        $metrics = is_array($coaching['metrics'] ?? null) ? $coaching['metrics'] : [];
+        $stepIndex = (int) ($coaching['step_index'] ?? 0);
+        $levelChanged = (bool) ($coaching['level_changed'] ?? false);
 
-        if (! $stepMode && $repeatCount < 3) {
+        $captures = (int) ($metrics['captures'] ?? 0);
+        $stuckScore = (int) ($metrics['stuckScore'] ?? 0);
+        $progressScore = (int) ($metrics['progressScore'] ?? 0);
+        $stagnantCaptures = (int) ($metrics['stagnantCaptures'] ?? 0);
+        $repeatAdvice = (int) ($metrics['repeatAdvice'] ?? 0);
+        $editorChanges = (int) ($metrics['editorChanges'] ?? 0);
+        $errorsSeen = (int) ($metrics['errorsSeen'] ?? 0);
+
+        if ($captures === 0 && $level === 'direct' && $stuckScore === 0) {
             return '';
         }
 
+        $switchNote = $levelChanged ? 'The coaching level JUST changed — briefly acknowledge the switch in speech.' : '';
+
         return <<<BLOCK
 
-STEP-BY-STEP MODE — the candidate is writing live and needs one small piece at a time.
-Talk like you are pair-programming: say WHERE, then WHAT code goes there.
+COACHING BRAIN — use these metrics to decide HOW to help (not just what to say):
+- Level: {$level} ({$label})
+- Stuck score: {$stuckScore}/100 (higher = candidate needs more hand-holding)
+- Progress score: {$progressScore}/100 (higher = they are moving forward)
+- Captures: {$captures} | Editor changes: {$editorChanges} | Stagnant captures: {$stagnantCaptures}
+- Same advice repeated: {$repeatAdvice} | Errors seen: {$errorsSeen}
+- Basic step index: {$stepIndex}
+{$switchNote}
 
-Rules for this pass:
-- Give only the next missing piece — one statement, one line, or one brace
-- If their editor already has the last piece you suggested, move to the next one
-- speech example: "Inside the loop, add: let stars = '*'.repeat(2 * i + 1);"
-- Current step progress index: {$stepIndex}
-- Repeat count (they may be stuck): {$repeatCount}
+Level rules:
+- discuss: explain the plan and first move. No full solution in speech.
+- direct: one place + one snippet. Wait for them to type before the next piece.
+- basic: smallest possible piece. Say WHERE, then exact code. They are stuck.
 BLOCK;
     }
 
